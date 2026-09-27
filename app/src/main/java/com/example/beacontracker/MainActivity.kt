@@ -2,6 +2,10 @@ package com.example.beacontracker
 
 import android.Manifest
 import android.bluetooth.BluetoothManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.drawable.BitmapDrawable
 import android.content.ClipData
 import android.content.ComponentName
 import android.content.Intent
@@ -62,8 +66,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.time.Duration.Companion.milliseconds
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.GeoPoint
@@ -94,6 +100,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Цветной круг-иконка для маркера карты (px — диаметр в пикселях). */
+    private fun circleIcon(color: Int, px: Int = 36): BitmapDrawable {
+        val bmp = Bitmap.createBitmap(px, px, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color }
+        canvas.drawCircle(px / 2f, px / 2f, px / 2f - 2f, paint)
+        return BitmapDrawable(resources, bmp)
+    }
+
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
@@ -107,6 +122,7 @@ class MainActivity : ComponentActivity() {
         var serviceRunning by remember { mutableStateOf(false) }
         var serviceError by remember { mutableStateOf<String?>(null) }
         var events by remember { mutableStateOf<List<String>>(emptyList()) }
+        var activeSessions by remember { mutableStateOf<Map<String, SessionsStore.SessionRecord>>(emptyMap()) }
         var packetCount by remember { mutableStateOf(0L) }
         var lastPacketAt by remember { mutableStateOf(0L) }
         var diagTick by remember { mutableStateOf(0) }
@@ -116,12 +132,12 @@ class MainActivity : ComponentActivity() {
         var filterMenuExpanded by remember { mutableStateOf(false) }
 
         LaunchedEffect(Unit) {
-            preset.apply() // применяем начальный пресет
-            store.serviceRunning.collect { serviceRunning = it }
-            store.serviceError.collect { serviceError = it }
-            store.events.collect { events = it }
-            store.packetCount.collect { packetCount = it }
-            store.lastPacketAt.collect { lastPacketAt = it }
+            preset.apply()
+            launch { store.serviceRunning.collect { serviceRunning = it } }
+            launch { store.serviceError.collect { serviceError = it } }
+            launch { store.events.collect { events = it } }
+            launch { store.packetCount.sample(500.milliseconds).collect { packetCount = it } }
+            launch { store.lastPacketAt.sample(500.milliseconds).collect { lastPacketAt = it } }
         }
         LaunchedEffect(diagTick) {
             delay(2000)
@@ -138,38 +154,44 @@ class MainActivity : ComponentActivity() {
         }
 
         LaunchedEffect(Unit) {
-            store.devices.collect { map ->
+            // sample: список устройств обновляется не чаще 2 раз в секунду
+            store.devices.sample(500.milliseconds).collect { map ->
                 devices.clear()
                 devices.putAll(map)
             }
         }
         LaunchedEffect(Unit) {
-            store.sessions.collect { list ->
-                sessions.clear()
-                sessions.addAll(list)
+            launch {
+                store.sessions.collect { list ->
+                    sessions.clear()
+                    sessions.addAll(list)
+                }
             }
+            launch { store.activeSessions.collect { map -> activeSessions = map } }
         }
 
         // Маркеры сессий на карте
-        LaunchedEffect(sessions.toList()) {
+        LaunchedEffect(sessions.toList(), activeSessions.values.toList()) {
             val mv = mapView ?: return@LaunchedEffect
             addedOverlays.forEach { mv.overlays.remove(it) }
             addedOverlays.clear()
+            // цветные круги: вход — зелёный, пик — оранжевый, выход — красный
+            fun mark(pts: MutableList<GeoPoint>, lat: Double?, lon: Double?, title: String, color: Int) {
+                if (lat == null || lon == null) return
+                val m = Marker(mv)
+                m.position = GeoPoint(lat, lon)
+                m.icon = circleIcon(color)
+                m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                m.title = title
+                mv.overlays.add(m)
+                addedOverlays.add(m)
+                pts.add(GeoPoint(lat, lon))
+            }
             sessions.forEach { r ->
                 val pts = mutableListOf<GeoPoint>()
-                fun mark(lat: Double?, lon: Double?, title: String) {
-                    if (lat == null || lon == null) return
-                    val m = Marker(mv)
-                    m.position = GeoPoint(lat, lon)
-                    m.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                    m.title = title
-                    mv.overlays.add(m)
-                    addedOverlays.add(m)
-                    pts.add(GeoPoint(lat, lon))
-                }
-                mark(r.entryLat, r.entryLon, "Вход: ${TimeFmt.short(r.entryTime)}")
-                mark(r.peakLat, r.peakLon, "Пик: ${r.peakRssi} dBm, ${TimeFmt.short(r.peakTime)}")
-                mark(r.exitLat, r.exitLon, "Выход: ${TimeFmt.short(r.exitTime)}")
+                mark(pts, r.entryLat, r.entryLon, "Вход: ${TimeFmt.short(r.entryTime)}", 0xFF4CAF50.toInt())
+                mark(pts, r.peakLat, r.peakLon, "Пик: ${r.peakRssi} dBm, ${TimeFmt.short(r.peakTime)}", 0xFFFF9800.toInt())
+                mark(pts, r.exitLat, r.exitLon, "Выход: ${TimeFmt.short(r.exitTime)}", 0xFFF44336.toInt())
                 if (pts.size >= 2) {
                     val line = Polyline(mv)
                     line.setPoints(pts)
@@ -178,6 +200,12 @@ class MainActivity : ComponentActivity() {
                     mv.overlays.add(line)
                     addedOverlays.add(line)
                 }
+            }
+            // Активные сессии: вход зелёным сразу, текущий пик — оранжевым
+            activeSessions.values.forEach { a ->
+                val pts = mutableListOf<GeoPoint>()
+                mark(pts, a.entryLat, a.entryLon, "Вход: ${TimeFmt.short(a.entryTime)} (в зоне)", 0xFF4CAF50.toInt())
+                mark(pts, a.peakLat, a.peakLon, "Пик сейчас: ${a.peakRssi} dBm, ${TimeFmt.short(a.peakTime)}", 0xFFFF9800.toInt())
             }
             mv.invalidate()
         }
@@ -263,7 +291,7 @@ class MainActivity : ComponentActivity() {
                 // Панель состояния
                 Text(
                     text = buildString {
-                        appendLine("сборка: fgs-diag-12")
+                        appendLine("сборка: fgs-diag-15")
                         appendLine("Bluetooth: ${if (isBluetoothOn()) "вкл" else "ВЫКЛ"}")
                         appendLine("GPS: ${if (isLocationEnabled()) "вкл" else "ВЫКЛ"}")
                         val missing = missingCoreNames()
@@ -278,13 +306,13 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.padding(vertical = 2.dp)
                 )
 
-                if (events.isNotEmpty()) {
-                    Text(
-                        text = events.joinToString("\n"),
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(bottom = 2.dp)
-                    )
-                }
+//                if (events.isNotEmpty()) {
+//                    Text(
+//                        text = events.joinToString("\n"),
+//                        style = MaterialTheme.typography.bodySmall,
+//                        modifier = Modifier.padding(bottom = 2.dp)
+//                    )
+//                }
 
                 Box(
                     Modifier
@@ -462,13 +490,11 @@ class MainActivity : ComponentActivity() {
         startService(Intent(this, ScanService::class.java).setAction(ScanService.ACTION_STOP))
     }
 
-    /** Сброс: трекер забывает активные сессии, список устройств и опознанные MAC. */
+    /** Сброс: удаляет историю сессий и метки на карте. Устройства в эфире не трогает. */
     private fun resetAll() {
-        store.clearDevices()
-        store.clearKnownMacs()
         startService(Intent(this, ScanService::class.java).setAction(ScanService.ACTION_RESET))
-        store.logEvent("сброс: устройства забыты")
-        toast("Сканер забыл устройства")
+        store.logEvent("сброс: сессии очищены")
+        toast("Сессии и метки очищены")
     }
 
     private fun exportCsv() {

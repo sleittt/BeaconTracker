@@ -44,6 +44,16 @@ class SessionsStore private constructor(context: Context) {
     private val _sessions = MutableStateFlow(load())
     val sessions: StateFlow<List<SessionRecord>> = _sessions
 
+    // Активные (незакрытые) сессии: вход/пик видны на карте сразу, без выхода
+    private val _activeSessions = MutableStateFlow<Map<String, SessionRecord>>(emptyMap())
+    val activeSessions: StateFlow<Map<String, SessionRecord>> = _activeSessions
+    fun upsertActive(r: SessionRecord) {
+        _activeSessions.value = _activeSessions.value + (r.mac to r)
+    }
+    fun removeActive(mac: String) {
+        _activeSessions.value = _activeSessions.value - mac
+    }
+
     // Текущие устройства в эфире (не сохраняются, только для UI)
     private val _devices = MutableStateFlow<Map<String, DeviceRow>>(emptyMap())
     val devices: StateFlow<Map<String, DeviceRow>> = _devices
@@ -79,9 +89,8 @@ class SessionsStore private constructor(context: Context) {
 
     @Synchronized
     fun add(r: SessionRecord) {
+        removeActive(r.mac)
         val list = load().toMutableList()
-        // id присваиваем здесь: трекер создаёт записи без id (0),
-        // а в LazyColumn ключ по id — дубликаты уронят Compose
         val newId = (list.maxOfOrNull { it.id } ?: 0L) + 1
         list.add(0, r.copy(id = newId))
         file.writeText(gson.toJson(list))
@@ -94,15 +103,16 @@ class SessionsStore private constructor(context: Context) {
         return gson.fromJson(file.readText(), type) ?: emptyList()
     }
 
-    fun updateDevice(mac: String, name: String, rssi: Int) {
-        _devices.value = _devices.value + (mac to DeviceRow(mac, name, rssi))
+    /** Пакетная замена списка устройств — 1 эмиссия вместо десятков в секунду. */
+    fun updateDevices(map: Map<String, DeviceRow>) {
+        _devices.value = LinkedHashMap(map)
     }
 
-    /** Сброс: забыть устройства в эфире и опознанные MAC. */
-    fun clearDevices() { _devices.value = emptyMap() }
-    fun clearKnownMacs() {
-        _knownMacs.value = emptySet()
-        prefs.edit().remove("macs").apply()
+    /** Сброс: удалить всю историю и активные сессии (метки на карте уйдут с ними). */
+    fun clearSessions() {
+        file.delete()
+        _sessions.value = emptyList()
+        _activeSessions.value = emptyMap()
     }
 
     companion object {

@@ -16,7 +16,9 @@ class SessionTracker(
     private val scope: CoroutineScope,
     private val exitTimeoutMs: Long = 7000L,
     private val locationProvider: () -> LatLon?,
-    private val onSessionClosed: (SessionsStore.SessionRecord) -> Unit
+    private val onSessionClosed: (SessionsStore.SessionRecord) -> Unit,
+    /** Вызывается при входе в зону и при каждом новом пике (для живых маркеров). */
+    private val onActiveChanged: (SessionsStore.SessionRecord) -> Unit = {}
 ) {
     data class LatLon(val lat: Double, val lon: Double)
 
@@ -43,6 +45,7 @@ class SessionTracker(
             st = State(mac, name, now)
             locationProvider()?.let { st.entryLat = it.lat; st.entryLon = it.lon }
             active[mac] = st
+            emitActive(st) // вход: маркер на карте сразу
         }
 
         st.exitJob?.cancel()
@@ -51,6 +54,7 @@ class SessionTracker(
             st.peakRssi = rssi
             st.peakTime = now
             locationProvider()?.let { st.peakLat = it.lat; st.peakLon = it.lon }
+            emitActive(st) // новый пик: оранжевый маркер едет в реальном времени
         }
 
         st.exitJob = scope.launch {
@@ -71,6 +75,23 @@ class SessionTracker(
                 )
             )
         }
+    }
+
+    /** Публикация активной сессии (без exitTime — сессия ещё открыта). */
+    private fun emitActive(st: State) {
+        onActiveChanged(
+            SessionsStore.SessionRecord(
+                mac = st.mac,
+                name = st.name,
+                entryTime = st.entryTime,
+                peakRssi = st.peakRssi,
+                peakTime = st.peakTime,
+                exitTime = 0L,
+                entryLat = st.entryLat, entryLon = st.entryLon,
+                peakLat = st.peakLat, peakLon = st.peakLon,
+                exitLat = null, exitLon = null
+            )
+        )
     }
 
     /** Забыть все активные сессии БЕЗ создания записей (кнопка «Сброс»). */

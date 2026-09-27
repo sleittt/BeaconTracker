@@ -44,6 +44,11 @@ class ScanService : Service() {
     private var scanning = false
     private var restartJob: kotlinx.coroutines.Job? = null
 
+    // Батчинг: пакеты идут десятками в секунду, в стор устройств
+    // пишем одной эмиссией раз в секунду — иначе UI перерисовывается
+    // на каждый пакет и приложение лагает при большом числе устройств
+    private val pendingDevices = mutableMapOf<String, DeviceRow>()
+
     override fun onCreate() {
         super.onCreate()
         store = SessionsStore.get(this)
@@ -58,8 +63,22 @@ class ScanService : Service() {
             locationProvider = {
                 lastLocation?.let { l -> SessionTracker.LatLon(l.latitude, l.longitude) }
             },
-            onSessionClosed = { store.add(it) }
+            onSessionClosed = {
+                store.removeActive(it.mac)
+                store.add(it)
+            },
+            onActiveChanged = { store.upsertActive(it) }
         )
+        // Флаш батча устройств раз в секунду (умрёт вместе с serviceScope)
+        serviceScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(1000)
+                if (pendingDevices.isNotEmpty()) {
+                    store.updateDevices(pendingDevices)
+                    pendingDevices.clear()
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -73,9 +92,8 @@ class ScanService : Service() {
                 }
                 ACTION_RESET -> {
                     tracker.reset()
-                    store.clearDevices()
-                    store.clearKnownMacs()
-                    store.logEvent("сброс: устройства забыты")
+                    store.clearSessions()
+                    store.logEvent("сброс: сессии очищены")
                     if (!scanning) stopSelf()
                 }
                 else -> startAsForeground()
@@ -127,7 +145,7 @@ class ScanService : Service() {
         Log.d("BeaconDbg", "service: startForeground ok, scan starting")
         store.logEvent("svc startForeground OK")
         // Перезапуск скана раз в 30 сек: на части прошивок фильтр-дедупликатор
-        // "залипает" и перестаёт отдавать новые устройства — рестарт пробивает
+        // "залипает" и перестаёт отдавать новые устройства
         restartJob = serviceScope.launch {
             while (true) {
                 kotlinx.coroutines.delay(30_000)
@@ -160,7 +178,7 @@ class ScanService : Service() {
         } catch (e: SecurityException) {
             null
         } ?: "неизвестно"
-        store.updateDevice(result.device.address, name, result.rssi)
+        pendingDevices[result.device.address] = DeviceRow(result.device.address, name, result.rssi)
         tracker.onResult(result.device.address, name, result.rssi)
 
         // Учимся: если это iBeacon-пакет или имя TG_ — запоминаем MAC,
