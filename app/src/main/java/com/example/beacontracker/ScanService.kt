@@ -29,7 +29,7 @@ import kotlinx.coroutines.launch
 /**
  * Foreground service: сканирует BLE и трекает геолокацию постоянно,
  * в том числе с выключенным экраном. Результаты пишет в SessionsStore
- * MainActivity подписан на те же потоки.
+ * (синглтон), MainActivity подписан на те же потоки.
  *
  * Фильтрация меток — в BeaconFilters.kt (BeaconFilterConfig.filters).
  */
@@ -64,13 +64,19 @@ class ScanService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         store.logEvent("svc onStartCommand action=${intent?.action}")
-        store.bumpStartAttempt()
         try {
             store.setServiceError(null)
             when (intent?.action) {
                 ACTION_STOP -> {
                     stopScan()
                     stopSelf()
+                }
+                ACTION_RESET -> {
+                    tracker.reset()
+                    store.clearDevices()
+                    store.clearKnownMacs()
+                    store.logEvent("сброс: устройства забыты")
+                    if (!scanning) stopSelf()
                 }
                 else -> startAsForeground()
             }
@@ -144,6 +150,7 @@ class ScanService : Service() {
     }
 
     private fun onScanResult(result: ScanResult) {
+        store.bumpPacket()
         Log.d("BeaconDbg", "seen: ${result.device.address} rssi=${result.rssi}")
         // Применяем все фильтры из конфигурации (пусто = все устройства)
         if (!BeaconFilterConfig.filters.all { it.matches(result) }) return
@@ -151,7 +158,6 @@ class ScanService : Service() {
         val name = try {
             result.device.name
         } catch (e: SecurityException) {
-            store.logEvent("svc SecurityException: ${e.message}")
             null
         } ?: "неизвестно"
         store.updateDevice(result.device.address, name, result.rssi)
@@ -212,6 +218,7 @@ class ScanService : Service() {
     companion object {
         const val ACTION_START = "com.example.beacontracker.START"
         const val ACTION_STOP = "com.example.beacontracker.STOP"
+        const val ACTION_RESET = "com.example.beacontracker.RESET"
         private const val NOTIF_ID = 1
         private const val CHANNEL_ID = "scan_channel"
     }

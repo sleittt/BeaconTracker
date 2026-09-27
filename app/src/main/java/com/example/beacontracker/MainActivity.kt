@@ -27,10 +27,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -42,6 +49,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -78,9 +86,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Configuration.getInstance().load(this, getSharedPreferences("osmdroid", MODE_PRIVATE))
         Configuration.getInstance().userAgentValue = packageName
-
         store = SessionsStore.get(this)
-
         setContent {
             MaterialTheme {
                 BeaconApp()
@@ -89,6 +95,7 @@ class MainActivity : ComponentActivity() {
     }
 
 
+    @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     private fun BeaconApp() {
         var granted by remember { mutableStateOf(corePermissionsGranted()) }
@@ -96,17 +103,21 @@ class MainActivity : ComponentActivity() {
         var myLocation by remember { mutableStateOf<MyLocationNewOverlay?>(null) }
         val addedOverlays = remember { mutableListOf<Overlay>() }
 
-        // Диагностика: перечитываем состояния системы раз в 2 сек
-        var diagTick by remember { mutableStateOf(0) }
+        // Состояние сервиса и диагностики
         var serviceRunning by remember { mutableStateOf(false) }
-        var startAttempts by remember { mutableStateOf(0) }
         var serviceError by remember { mutableStateOf<String?>(null) }
         var events by remember { mutableStateOf<List<String>>(emptyList()) }
         var packetCount by remember { mutableStateOf(0L) }
         var lastPacketAt by remember { mutableStateOf(0L) }
+        var diagTick by remember { mutableStateOf(0) }
+
+        // Фильтр (пресет)
+        var preset by remember { mutableStateOf(ScanFilterPreset.IBEACON) }
+        var filterMenuExpanded by remember { mutableStateOf(false) }
+
         LaunchedEffect(Unit) {
+            preset.apply() // применяем начальный пресет
             store.serviceRunning.collect { serviceRunning = it }
-            store.startAttempts.collect { startAttempts = it }
             store.serviceError.collect { serviceError = it }
             store.events.collect { events = it }
             store.packetCount.collect { packetCount = it }
@@ -132,7 +143,6 @@ class MainActivity : ComponentActivity() {
                 devices.putAll(map)
             }
         }
-
         LaunchedEffect(Unit) {
             store.sessions.collect { list ->
                 sessions.clear()
@@ -172,7 +182,6 @@ class MainActivity : ComponentActivity() {
             mv.invalidate()
         }
 
-        // Жизненный цикл MapView
         val lifecycleOwner = LocalLifecycleOwner.current
         DisposableEffect(lifecycleOwner) {
             val observer = LifecycleEventObserver { _, event ->
@@ -189,31 +198,76 @@ class MainActivity : ComponentActivity() {
         Surface(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().padding(8.dp)) {
 
+                // Кнопки управления
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Button(onClick = ::startScanning, modifier = Modifier.weight(1f)) {
-                        Text("Старт")
+                    Button(
+                        onClick = ::startScanning,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (serviceRunning) Color(0xFF4CAF50)
+                            else MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Text(if (serviceRunning) "Работает" else "Старт")
                     }
                     Button(onClick = ::stopScanning, modifier = Modifier.weight(1f)) {
                         Text("Стоп")
+                    }
+                    Button(onClick = ::resetAll, modifier = Modifier.weight(1f)) {
+                        Text("Сброс")
                     }
                     Button(onClick = ::exportCsv, modifier = Modifier.weight(1f)) {
                         Text("Экспорт")
                     }
                 }
 
+                // Выбор фильтра
+                ExposedDropdownMenuBox(
+                    expanded = filterMenuExpanded,
+                    onExpandedChange = { filterMenuExpanded = it },
+                    modifier = Modifier.padding(vertical = 4.dp)
+                ) {
+                    TextField(
+                        value = preset.label,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Фильтр") },
+                        trailingIcon = {
+                            ExposedDropdownMenuDefaults.TrailingIcon(expanded = filterMenuExpanded)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                    )
+                    ExposedDropdownMenu(
+                        expanded = filterMenuExpanded,
+                        onDismissRequest = { filterMenuExpanded = false }
+                    ) {
+                        ScanFilterPreset.entries.forEach { p ->
+                            DropdownMenuItem(
+                                text = { Text(p.label) },
+                                onClick = {
+                                    preset = p
+                                    p.apply()
+                                    store.logEvent("фильтр: ${p.label}")
+                                    filterMenuExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // Панель состояния
                 Text(
                     text = buildString {
-                        appendLine("сборка: fgs-diag-10")
-                        appendLine("Манифест: ${if (isServiceDeclared()) "сервис объявлен" else "СЕРВИС НЕ ОБЪЯВЛЕН!"}")
+                        appendLine("сборка: fgs-diag-12")
                         appendLine("Bluetooth: ${if (isBluetoothOn()) "вкл" else "ВЫКЛ"}")
                         appendLine("GPS: ${if (isLocationEnabled()) "вкл" else "ВЫКЛ"}")
                         val missing = missingCoreNames()
                         appendLine("Разрешения: ${if (missing.isEmpty()) "все выданы" else "НЕТ: $missing"}")
-                        appendLine("Сервис: ${if (serviceRunning) "работает" else "НЕ запущен"}")
-                        appendLine("Попыток старта: $startAttempts")
                         serviceError?.let { appendLine("ОШИБКА: $it") }
                         val idleSec = if (lastPacketAt == 0L) "-"
                         else (System.currentTimeMillis() - lastPacketAt) / 1000
@@ -224,7 +278,6 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.padding(vertical = 2.dp)
                 )
 
-                // Лента событий
                 if (events.isNotEmpty()) {
                     Text(
                         text = events.joinToString("\n"),
@@ -243,12 +296,12 @@ class MainActivity : ComponentActivity() {
                     AndroidView(
                         factory = { ctx ->
                             MapView(ctx).apply {
-                                val tileSource = XYTileSource(
-                                    "OSM.DE",
-                                    0, 19, 256, ".png",
-                                    arrayOf("https://tile.openstreetmap.de/")
+                                setTileSource(
+                                    XYTileSource(
+                                        "OSM.DE", 0, 19, 256, ".png",
+                                        arrayOf("https://tile.openstreetmap.de/")
+                                    )
                                 )
-                                setTileSource(tileSource)
                                 setMultiTouchControls(true)
                                 controller.setZoom(16.0)
                                 val o = MyLocationNewOverlay(GpsMyLocationProvider(ctx), this)
@@ -261,7 +314,6 @@ class MainActivity : ComponentActivity() {
                             if (granted) {
                                 myLocation?.enableMyLocation()
                                 myLocation?.enableFollowLocation()
-                                // Центрируем на первом же фиксе координат
                                 myLocation?.runOnFirstFix {
                                     runOnUiThread {
                                         myLocation?.myLocation?.let { loc ->
@@ -326,7 +378,6 @@ class MainActivity : ComponentActivity() {
     }
 
 
-    /** Обязательные разрешения для сканирования и карты. БЕЗ нотификаций. */
     private fun corePermissions(): List<String> {
         val perms = mutableListOf(
             Manifest.permission.ACCESS_FINE_LOCATION,
@@ -378,25 +429,9 @@ class MainActivity : ComponentActivity() {
                 lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
     }
 
-    /** Проверка в рантайме: сервис объявлен в манифесте или нет. */
-    private fun isServiceDeclared(): Boolean =
-        try {
-            packageManager.getServiceInfo(ComponentName(this, ScanService::class.java), 0)
-            true
-        } catch (e: PackageManager.NameNotFoundException) {
-            false
-        }
-
     private fun startScanning() {
-        store.logEvent("click Старт")
-        if (!isServiceDeclared()) {
-            store.setServiceError("ScanService НЕ объявлен в AndroidManifest!")
-            store.logEvent("ERROR: сервиса нет в манифесте")
-            return
-        }
         if (!corePermissionsGranted()) {
-            toast("Не выдано: ${missingCoreNames()}. Проверь настройки приложения.")
-            // Открываем настройки приложения, если система больше не показывает диалог
+            toast("Не выдано: ${missingCoreNames()}")
             startActivity(
                 Intent(
                     Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -410,7 +445,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (!isLocationEnabled()) {
-            toast("Включи геолокацию (GPS) в шторке")
+            toast("Включи геолокацию (GPS)")
             return
         }
         try {
@@ -418,17 +453,22 @@ class MainActivity : ComponentActivity() {
                 this,
                 Intent(this, ScanService::class.java).setAction(ScanService.ACTION_START)
             )
-            store.logEvent("startForegroundService() вызван")
         } catch (e: Exception) {
             store.setServiceError("startForegroundService: ${e.javaClass.simpleName}: ${e.message}")
-            store.logEvent("ERROR вызова: ${e.javaClass.simpleName}: ${e.message}")
         }
-        toast("Сканирование запущено")
     }
 
     private fun stopScanning() {
         startService(Intent(this, ScanService::class.java).setAction(ScanService.ACTION_STOP))
-        toast("Остановлено")
+    }
+
+    /** Сброс: трекер забывает активные сессии, список устройств и опознанные MAC. */
+    private fun resetAll() {
+        store.clearDevices()
+        store.clearKnownMacs()
+        startService(Intent(this, ScanService::class.java).setAction(ScanService.ACTION_RESET))
+        store.logEvent("сброс: устройства забыты")
+        toast("Сканер забыл устройства")
     }
 
     private fun exportCsv() {
@@ -452,5 +492,5 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toast(msg: String) =
-        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 }

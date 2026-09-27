@@ -1,8 +1,6 @@
 package com.example.beacontracker
 
 import android.annotation.SuppressLint
-import android.util.Log
-import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
@@ -11,8 +9,16 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
 import androidx.core.content.ContextCompat
 
+/**
+ * Обёртка над BluetoothLeScanner.
+ * Аппаратный фильтр по company ID отбирает пакеты в прошивке чипа —
+ * это обходит баги хост-пути, где на части устройств терялись пакеты
+ * от устройств со static random address. Значение меняется на лету
+ * через IBEACON_MANUFACTURER_ID / пресеты ScanFilterPreset.
+ */
 class BleScanner(
     context: Context,
     private val onResult: (ScanResult) -> Unit,
@@ -34,18 +40,13 @@ class BleScanner(
         }
     }
 
-    /**
-     * Аппаратный фильтр: только iBeacon (manufacturer Apple 0x004C,
-     * первые два байта данных 0x02 0x15). Отбор идёт в прошивке чипа —
-     * обходит баги хост-пути, где терялись пакеты с random-адресов.
-     * null в IBEACON_MANUFACTURER_ID = снова видеть все устройства.
-     */
-    private val scanFilters: List<ScanFilter>? =
-        IBEACON_MANUFACTURER_ID?.let { apple ->
+    /** Фильтр собирается при каждом старте — менять можно на лету. */
+    private fun buildScanFilters(): List<ScanFilter>? =
+        IBEACON_MANUFACTURER_ID?.let { mfr ->
             listOf(
                 ScanFilter.Builder()
                     .setManufacturerData(
-                        apple,
+                        mfr,
                         byteArrayOf(0x02, 0x15),
                         byteArrayOf(0xFF.toByte(), 0xFF.toByte())
                     )
@@ -67,9 +68,6 @@ class BleScanner(
             !hasScanPermission() -> onError("Нет разрешения BLUETOOTH_SCAN")
             scanner == null -> onError("BLE не поддерживается на устройстве")
             else -> {
-                // Настройки как у nRF Connect: агрессивный матчинг, все пакеты,
-                // без батчинга. На части прошивок (MediaTek!) софтверный скан
-                // с дефолтными настройками пропускает устройства.
                 val settings = ScanSettings.Builder()
                     .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
                     .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
@@ -77,8 +75,7 @@ class BleScanner(
                     .setNumOfMatches(ScanSettings.MATCH_NUM_MAX_ADVERTISEMENT)
                     .setReportDelay(0L)
                     .build()
-                Log.d("BeaconDbg", "scanner.start() called")
-                scanner.startScan(scanFilters, settings, callback)
+                scanner.startScan(buildScanFilters(), settings, callback)
             }
         }
     }
@@ -90,6 +87,10 @@ class BleScanner(
 
     companion object {
         /** Apple company ID (iBeacon). null = видеть все BLE-устройства. */
-        val IBEACON_MANUFACTURER_ID: Int? = 0x004C
+        @Volatile
+        var IBEACON_MANUFACTURER_ID: Int? = 0x004C
+
+        fun filterIBeaconOnly() { IBEACON_MANUFACTURER_ID = 0x004C }
+        fun filterAllDevices() { IBEACON_MANUFACTURER_ID = null }
     }
 }

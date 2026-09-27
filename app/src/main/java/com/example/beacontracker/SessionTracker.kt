@@ -73,6 +73,12 @@ class SessionTracker(
         }
     }
 
+    /** Забыть все активные сессии БЕЗ создания записей (кнопка «Сброс»). */
+    fun reset() {
+        active.values.forEach { it.exitJob?.cancel() }
+        active.clear()
+    }
+
     /** Принудительно закрыть все активные сессии (при остановке сканирования). */
     fun closeAll() {
         val now = System.currentTimeMillis()

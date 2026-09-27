@@ -3,56 +3,47 @@ package com.example.beacontracker
 import android.bluetooth.le.ScanResult
 
 /**
- * Точка расширения фильтрации меток.
- *
- * Как добавить новый фильтр:
- *   1. Напиши класс, реализующий BeaconFilter (или используй готовые ниже).
- *   2. Добавь его экземпляр в BeaconFilterConfig.filters.
- * Всё. Сканер, трекер, UI менять не нужно.
- *
- * В matches() доступен полный ScanResult: device, rssi,
- * scanRecord (UUID сервисов, manufacturer-данные, txPower) — хватит
- * на любые параметры, какие придумает заказчик.
+ * Программная фильтрация пакетов (работает поверх уже принятых).
+ * Добавить свой фильтр = написать класс с BeaconFilter и добавить
+ * экземпляр в пресет или в BeaconFilterConfig.filters.
  */
 fun interface BeaconFilter {
     fun matches(result: ScanResult): Boolean
 }
 
-/** Сюда добавлять фильтры. Пустой список = видны все BLE-устройства. */
+/** Живой список программных фильтров. Меняется пресетами (ScanFilterPreset). */
 object BeaconFilterConfig {
-    /**
-     * Провайдер MAC меток, опознанных автоматически. Заполняется
-     * ScanService при старте сервиса — сюда подставляется хранилище.
-     */
     var knownMacsProvider: () -> Set<String> = { emptySet() }
-
-    /**
-     * Фильтр по умолчанию: автоматически распознаёт метки.
-     * Пропускает устройство, если:
-     *  1) это iBeacon-пакет (парсится UUID/Major/Minor), или
-     *  2) имя начинается с TG_, или
-     *  3) MAC уже видели раньше как метку (запоминается само).
-     * Метки должны быть в режиме iBeacon или Смешанный (настраивается
-     * один раз в «Эскорт Конфигураторе»).
-     * Чтобы игнорировать чужие далёкие метки, добавь MinRssiFilter(-80).
-     */
-    val filters: List<BeaconFilter> = emptyList()
-//        listOf(
-//        SmartBeaconFilter { knownMacsProvider() }
-//    )
-
-    // Другие варианты:
-    //   listOf(NamePrefixFilter("TG_"))               — только по имени (метки без имени не пройдут)
-    //   listOf(MacFilter("AA:BB:CC:DD:EE:FF"))        — жёстко одна метка
-    //   listOf(IBeaconUuidFilter("A386C1DD-EEFF-A9E0-93F3-A3B501004060"))
-    //   listOf(SmartBeaconFilter { knownMacsProvider() }, MinRssiFilter(-80))
+    var filters: List<BeaconFilter> = emptyList()
 }
 
 /**
- * Автоматическое распознавание меток: iBeacon-пакет ИЛИ имя TG_
- * ИЛИ MAC из списка уже опознанных (наполняется сам при первом
- * совпадении по 1 или 2).
+ * Готовые наборы фильтрации, переключаются из выпадающего меню.
+ * Каждый пресет задаёт и аппаратный фильтр чипа
+ * (BleScanner.IBEACON_MANUFACTURER_ID), и программные фильтры.
+ * Новое значение вступает в силу при следующем старте скана
+ * (сервис перезапускает скан каждые 30 с, либо Стоп/Старт).
  */
+enum class ScanFilterPreset(val label: String) {
+    ALL("Все BLE-устройства"),
+    IBEACON("Только iBeacon"),
+    ESCORT("Метки Эскорт (TG_)"),
+    NEARBY("iBeacon ближе -80 dBm");
+
+    fun apply() {
+        BleScanner.IBEACON_MANUFACTURER_ID = when (this) {
+            ALL -> null
+            else -> 0x004C
+        }
+        BeaconFilterConfig.filters = when (this) {
+            ALL, IBEACON -> emptyList()
+            ESCORT -> listOf(SmartBeaconFilter { BeaconFilterConfig.knownMacsProvider() })
+            NEARBY -> listOf(MinRssiFilter(-80))
+        }
+    }
+}
+
+/** Авто-распознавание: iBeacon-пакет ИЛИ имя TG_ ИЛИ MAC уже опознанной метки. */
 class SmartBeaconFilter(private val knownMacs: () -> Set<String>) : BeaconFilter {
     override fun matches(result: ScanResult): Boolean {
         if (IBeaconParser.parse(result) != null) return true
@@ -66,8 +57,6 @@ class SmartBeaconFilter(private val knownMacs: () -> Set<String>) : BeaconFilter
     }
 }
 
-/** По префиксу имени. ВАЖНО: многие метки не вещают имя в пакете —
- *  с этим фильтром список может быть пустым. Надёжнее MacFilter. */
 class NamePrefixFilter(private val prefix: String) : BeaconFilter {
     override fun matches(result: ScanResult): Boolean {
         val name = try {
@@ -79,21 +68,24 @@ class NamePrefixFilter(private val prefix: String) : BeaconFilter {
     }
 }
 
-/** По MAC-адресу конкретной метки. */
 class MacFilter(private val mac: String) : BeaconFilter {
     override fun matches(result: ScanResult): Boolean =
         result.device.address.equals(mac, ignoreCase = true)
 }
 
-/** Только устройства ближе порога (по RSSI). */
 class MinRssiFilter(private val minRssi: Int) : BeaconFilter {
     override fun matches(result: ScanResult): Boolean = result.rssi >= minRssi
 }
 
-/** По UUID iBeacon-рассылки (нужен, если метки в режиме iBeacon). */
 class IBeaconUuidFilter(private val uuid: String) : BeaconFilter {
     override fun matches(result: ScanResult): Boolean =
         IBeaconParser.parse(result)?.uuid.equals(uuid, ignoreCase = true)
+}
+
+/** По суффиксу UUID (у вендора меток суффикс общий). Пример: "-eeff-a9e0-93f3-a3b50100406". */
+class IBeaconUuidSuffixFilter(private val suffix: String) : BeaconFilter {
+    override fun matches(result: ScanResult): Boolean =
+        IBeaconParser.parse(result)?.uuid?.endsWith(suffix, ignoreCase = true) == true
 }
 
 data class IBeaconData(
@@ -107,7 +99,6 @@ data class IBeaconData(
 object IBeaconParser {
     fun parse(result: ScanResult): IBeaconData? {
         val data = result.scanRecord?.getManufacturerSpecificData(0x004C) ?: return null
-        // Формат: 02 15 | 16 байт UUID | 2 байта Major | 2 байта Minor | 1 байт TxPower
         if (data.size < 23 || data[0] != 0x02.toByte() || data[1] != 0x15.toByte()) return null
 
         val uuid = StringBuilder()
@@ -117,7 +108,7 @@ object IBeaconParser {
         }
         val major = ((data[18].toInt() and 0xFF) shl 8) or (data[19].toInt() and 0xFF)
         val minor = ((data[20].toInt() and 0xFF) shl 8) or (data[21].toInt() and 0xFF)
-        val txPower = data[22].toInt() // знаковый
+        val txPower = data[22].toInt()
         return IBeaconData(uuid.toString(), major, minor, txPower)
     }
 }
